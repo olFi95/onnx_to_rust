@@ -10,13 +10,10 @@ extern "C" {
 }
 
 fn main() {
-    // Create the input tensor (1x3x224x224)
     let mut tensor_input: Vec<c_float> = vec![0.0; 1*28*28];
 
-    // Create the output tensor (1x1728)
     let mut tensor_output: Vec<c_float> = vec![0.0; 1*10];
 
-    // Call the C function
     unsafe {
         entry(tensor_input.as_ptr(), tensor_output.as_mut_ptr());
     }
