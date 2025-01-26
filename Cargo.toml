@@ -6,6 +6,13 @@ edition = "2021"
 [dependencies]
 protobuf-parse = "3.7.1"
 prost = "0.13.4"
+clap = { version = "4.5.27", features = ["derive"] }
+quote = "1.0.38"
+phf = { version = "0.10.0", features = ["macros"] }
+prettyplease = "0.2.29"
+syn = "2.0.96"
+proc-macro2 = "1.0.93"
+num = "0.4.3"
 
 [build-dependencies]
 protobuf = "3.7.1"

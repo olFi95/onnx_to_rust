@@ -1,5 +1,7 @@
-use std::fmt::Display;
+mod nodes;
+use clap::Parser;
 use prost::Message;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::Read;
 
@@ -18,10 +20,28 @@ fn deserialize_protobuf_file(file_path: &str) -> Result<ModelProto, Box<dyn std:
     Ok(model_proto)
 }
 
-fn main() {
-    let model_proto = deserialize_protobuf_file("resources/mnist-8.onnx").expect("cannot deserialize .onnx file");
-    print_metadata(model_proto);
+#[derive(Parser, Debug)]
+struct Args {
+    /// Sets the input file
+    #[clap(short, long, value_name = "FILE")]
+    input_file: String,
 
+    /// Sets the output file (defaults to `output.txt`)
+    #[clap(short, long, value_name = "FILE", default_value = "output.txt")]
+    output_file: String,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let model_proto = deserialize_protobuf_file(args.input_file.as_str()).expect("cannot deserialize .onnx file");
+    // print_metadata(model_proto);
+    let code_generator = nodes::OnnxCodeGenerator::new(&model_proto, args.output_file.parse().unwrap());
+    let tensor_data = code_generator.generate_tensor_data();
+    let code = tensor_data.to_string();
+    let syntax_tree = syn::parse_file(&code).unwrap();
+    let formatted = prettyplease::unparse(&syntax_tree);
+    print!("{}", formatted);
 }
 
 fn print_metadata(model_proto: ModelProto) {
@@ -84,16 +104,23 @@ fn print_metadata(model_proto: ModelProto) {
 
     match model_proto.graph {
         Some(graph) => {
+            println!("DATA:");
+            for initializer in graph.initializer {
+                println!("Name: {}", initializer.name.expect("variable without a name cannot exist."));
+                println!("Dimensions: {:?}", initializer.dims);
+                println!("Type: {}", nodes::rust_type(&nodes::OnnxCodeGenerator::from_i32(initializer.data_type.unwrap()).unwrap()));
+            }
+
             println!("NODES:");
-            for node in graph.node {
-                println!("Node name: {}", node.name.unwrap());
-                println!("Node op_type: {}", node.op_type.unwrap());
+            for node in &graph.node {
+                println!("Node name: {}", node.name.as_ref().unwrap());
+                println!("Node op_type: {}", node.op_type.as_ref().unwrap());
                 println!("Inputs: ");
-                for input in node.input {
+                for input in &node.input {
                     println!("Input: {}", input);
                 }
                 println!("Outputs: ");
-                for output in node.output {
+                for output in &node.output {
                     println!("Outputs: {}", output);
                 }
             }
