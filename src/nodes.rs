@@ -48,8 +48,8 @@ impl<'a> OnnxCodeGenerator<'a> {
             // Generate method name from node name (sanitize for valid Rust identifiers)
             let method_name = format_ident!("layer_{}", sanitize_identifier(node_name));
 
-            // Collect input parameters
-            let input_params = self.generate_input_parameters(&node.input);
+            // Collect input parameters with proper types
+            let input_params = self.generate_input_parameters_with_types(&node.input);
 
             // Determine output types
             let output_type = self.generate_output_type(&node.output);
@@ -131,29 +131,11 @@ impl<'a> OnnxCodeGenerator<'a> {
 
                 // Check if it's an initializer (static tensor) or intermediate output
                 if initializer_names.contains(input_name) {
-                    // It's a static tensor - flatten and use it directly
+                    // It's a static tensor - use it directly without flattening
                     let tensor_name = format_ident!("{}", input_name);
-
-                    // Check if it's an i64 tensor (for shapes)
-                    if input_name.contains("shape") {
-                        input_retrieval.append_all(quote! {
-                            let #var_name: Vec<f32> = #tensor_name.iter()
-                                .copied()
-                                .map(|x| x as f32)
-                                .collect();
-                        });
-                    } else {
-                        // Regular f32 tensor - flatten all dimensions
-                        input_retrieval.append_all(quote! {
-                            let #var_name: Vec<f32> = #tensor_name.iter()
-                                .flat_map(|a| a.iter())
-                                .flat_map(|b| b.iter())
-                                .flat_map(|c| c.iter())
-                                .flat_map(|d| d.iter())
-                                .copied()
-                                .collect();
-                        });
-                    }
+                    input_retrieval.append_all(quote! {
+                        let #var_name = &#tensor_name;
+                    });
                 } else {
                     // It's an intermediate output or input - get from HashMap
                     input_retrieval.append_all(quote! {
@@ -165,9 +147,18 @@ impl<'a> OnnxCodeGenerator<'a> {
                 }
             }
 
-            // Generate the layer call with all inputs as slices
-            let input_refs: Vec<_> = input_vars.iter()
-                .map(|var| quote! { #var.as_slice() })
+            // Generate the layer call with appropriate references
+            let input_refs: Vec<_> = node.input.iter()
+                .enumerate()
+                .map(|(idx, input_name)| {
+                    let var = &input_vars[idx];
+                    // If it's an initializer, it's already a reference; if it's intermediate output, convert to slice
+                    if initializer_names.contains(input_name) {
+                        quote! { #var }
+                    } else {
+                        quote! { #var.as_slice() }
+                    }
+                })
                 .collect();
 
             // Store the output(s)
@@ -245,7 +236,60 @@ impl<'a> OnnxCodeGenerator<'a> {
         }
     }
 
-    /// Generiert die Input-Parameter für eine Methode
+    /// Generiert die Input-Parameter für eine Methode mit korrekten Typen
+    fn generate_input_parameters_with_types(&self, inputs: &[String]) -> TokenStream {
+        let mut params = quote! {};
+        let graph = self.model_proto.graph.as_ref().expect("Model has no graph");
+
+        // Build a map of initializer names to their tensor info
+        let initializer_map: std::collections::HashMap<String, &crate::TensorProto> = graph.initializer.iter()
+            .filter_map(|init| init.name.as_ref().map(|name| (name.clone(), init)))
+            .collect();
+
+        for (idx, input_name) in inputs.iter().enumerate() {
+            let param_name = format_ident!("input_{}", idx);
+
+            // Check if this input is an initializer (static tensor)
+            if let Some(tensor) = initializer_map.get(input_name) {
+                // Get the tensor type and dimensions
+                let tensor_type = self.get_tensor_type_reference(tensor);
+                params.append_all(quote! {
+                    #param_name: &#tensor_type,
+                });
+            } else {
+                // It's an intermediate result or graph input - use &[f32] as default
+                params.append_all(quote! {
+                    #param_name: &[f32],
+                });
+            }
+        }
+
+        params
+    }
+
+    /// Gets the Rust type for a tensor as a reference type
+    fn get_tensor_type_reference(&self, tensor: &crate::TensorProto) -> TokenStream {
+        let dims = &tensor.dims;
+        let tensor_datatype_id = tensor.data_type.expect("Tensor data-type missing");
+        let tensor_datatype_onnx = Self::from_i32(tensor_datatype_id).expect("no onnx type found for id");
+        let rust_type = format_ident!("{}", rust_type(&tensor_datatype_onnx));
+
+        // Build nested array type from dimensions
+        self.build_array_type_tokens(dims, &rust_type)
+    }
+
+    /// Builds a nested array type from dimensions
+    fn build_array_type_tokens(&self, dims: &[i64], element_type: &proc_macro2::Ident) -> TokenStream {
+        if dims.is_empty() {
+            quote! { #element_type }
+        } else {
+            let inner = self.build_array_type_tokens(&dims[1..], element_type);
+            let dim = dims[0] as usize;
+            quote! { [#inner; #dim] }
+        }
+    }
+
+    /// Generiert die Input-Parameter für eine Methode (alte Version für Kompatibilität)
     fn generate_input_parameters(&self, inputs: &[String]) -> TokenStream {
         let mut params = quote! {};
 
