@@ -40,6 +40,7 @@ impl<'a> OnnxCodeGenerator<'a> {
 
         let graph = self.model_proto.graph.as_ref().expect("Model has no graph");
 
+        // Generate individual layer methods
         for node in &graph.node {
             let node_name = node.name.as_ref().expect("Node has no name");
             let op_type = node.op_type.as_ref().expect("Node has no op_type");
@@ -67,7 +68,181 @@ impl<'a> OnnxCodeGenerator<'a> {
             });
         }
 
+        // Generate main inference method that chains all layers
+        let main_inference = self.generate_main_inference_method();
+        output.append_all(main_inference);
+
         output
+    }
+
+    /// Generates the main inference method that executes all layers in sequence
+    pub fn generate_main_inference_method(&self) -> TokenStream {
+        let graph = self.model_proto.graph.as_ref().expect("Model has no graph");
+
+        // Collect all initializer names (these are static tensors)
+        let initializer_names: std::collections::HashSet<String> = graph.initializer.iter()
+            .filter_map(|init| init.name.clone())
+            .collect();
+
+        // Collect graph inputs (filter out initializers - only keep real inputs)
+        let all_inputs: Vec<String> = graph.input.iter()
+            .filter_map(|input| input.name.clone())
+            .collect();
+
+        let real_inputs: Vec<String> = all_inputs.iter()
+            .filter(|name| !initializer_names.contains(*name))
+            .cloned()
+            .collect();
+
+        // Collect graph outputs
+        let graph_outputs: Vec<String> = graph.output.iter()
+            .filter_map(|output| output.name.clone())
+            .collect();
+
+        // Generate the layer execution code
+        let mut layer_executions = quote! {};
+
+        // Create a HashMap to store intermediate results
+        layer_executions.append_all(quote! {
+            use std::collections::HashMap;
+            let mut intermediate_outputs: HashMap<String, Vec<f32>> = HashMap::new();
+        });
+
+        // Add only real inputs (not initializers) to intermediate outputs
+        for (idx, input_name) in real_inputs.iter().enumerate() {
+            let param_name = format_ident!("input_{}", idx);
+            layer_executions.append_all(quote! {
+                intermediate_outputs.insert(#input_name.to_string(), #param_name.to_vec());
+            });
+        }
+
+        // Execute each layer in sequence
+        for node in &graph.node {
+            let node_name = node.name.as_ref().expect("Node has no name");
+            let method_name = format_ident!("layer_{}", sanitize_identifier(node_name));
+
+            // Generate code to retrieve inputs for this layer
+            let mut input_vars = Vec::new();
+            let mut input_retrieval = quote! {};
+
+            for (idx, input_name) in node.input.iter().enumerate() {
+                let var_name = format_ident!("input_{}_for_{}", idx, sanitize_identifier(node_name));
+                input_vars.push(var_name.clone());
+
+                // Check if it's an initializer (static tensor) or intermediate output
+                if initializer_names.contains(input_name) {
+                    // It's a static tensor - flatten and use it directly
+                    let tensor_name = format_ident!("{}", input_name);
+
+                    // Check if it's an i64 tensor (for shapes)
+                    if input_name.contains("shape") {
+                        input_retrieval.append_all(quote! {
+                            let #var_name: Vec<f32> = #tensor_name.iter()
+                                .copied()
+                                .map(|x| x as f32)
+                                .collect();
+                        });
+                    } else {
+                        // Regular f32 tensor - flatten all dimensions
+                        input_retrieval.append_all(quote! {
+                            let #var_name: Vec<f32> = #tensor_name.iter()
+                                .flat_map(|a| a.iter())
+                                .flat_map(|b| b.iter())
+                                .flat_map(|c| c.iter())
+                                .flat_map(|d| d.iter())
+                                .copied()
+                                .collect();
+                        });
+                    }
+                } else {
+                    // It's an intermediate output or input - get from HashMap
+                    input_retrieval.append_all(quote! {
+                        let #var_name = intermediate_outputs
+                            .get(#input_name)
+                            .expect(&format!("Input '{}' not found", #input_name))
+                            .clone();
+                    });
+                }
+            }
+
+            // Generate the layer call with all inputs as slices
+            let input_refs: Vec<_> = input_vars.iter()
+                .map(|var| quote! { #var.as_slice() })
+                .collect();
+
+            // Store the output(s)
+            if node.output.len() == 1 {
+                let output_name = &node.output[0];
+                layer_executions.append_all(quote! {
+                    #input_retrieval
+                    let output = #method_name(#(#input_refs),*);
+                    intermediate_outputs.insert(#output_name.to_string(), output);
+                });
+            } else {
+                // Multiple outputs (tuple)
+                let output_names = &node.output;
+                let output_vars: Vec<_> = (0..output_names.len())
+                    .map(|i| format_ident!("out_{}", i))
+                    .collect();
+
+                layer_executions.append_all(quote! {
+                    #input_retrieval
+                    let (#(#output_vars),*) = #method_name(#(#input_refs),*);
+                });
+
+                for (idx, output_name) in output_names.iter().enumerate() {
+                    let var = &output_vars[idx];
+                    layer_executions.append_all(quote! {
+                        intermediate_outputs.insert(#output_name.to_string(), #var);
+                    });
+                }
+            }
+        }
+
+        // Return the final output(s)
+        let return_statement = if graph_outputs.len() == 1 {
+            let output_name = &graph_outputs[0];
+            quote! {
+                intermediate_outputs.remove(#output_name).expect("Output not found")
+            }
+        } else {
+            let output_retrievals: Vec<_> = graph_outputs.iter()
+                .map(|name| quote! {
+                    intermediate_outputs.remove(#name).expect("Output not found")
+                })
+                .collect();
+            quote! {
+                (#(#output_retrievals),*)
+            }
+        };
+
+        // Generate input parameters for main inference (only real inputs, not initializers)
+        let mut main_input_params = quote! {};
+        for (idx, _) in real_inputs.iter().enumerate() {
+            let param_name = format_ident!("input_{}", idx);
+            main_input_params.append_all(quote! {
+                #param_name: &[f32],
+            });
+        }
+
+        // Determine return type
+        let return_type = if graph_outputs.len() == 1 {
+            quote! { Vec<f32> }
+        } else {
+            let output_types = (0..graph_outputs.len()).map(|_| quote! { Vec<f32> });
+            quote! { (#(#output_types),*) }
+        };
+
+        quote! {
+            /// Main inference method that executes the entire model
+            ///
+            /// This method chains all layers in the correct order according to the ONNX graph,
+            /// passing intermediate results between layers.
+            pub fn infer(#main_input_params) -> #return_type {
+                #layer_executions
+                #return_statement
+            }
+        }
     }
 
     /// Generiert die Input-Parameter für eine Methode
