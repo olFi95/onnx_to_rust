@@ -35,13 +35,12 @@ fn main() {
     let args = Args::parse();
 
     let model_proto = deserialize_protobuf_file(args.input_file.as_str()).expect("cannot deserialize .onnx file");
-    // print_metadata(model_proto);
     let code_generator = nodes::OnnxCodeGenerator::new(&model_proto, args.output_file.parse().unwrap());
     let tensor_data = code_generator.generate_tensor_data();
     let code = tensor_data.to_string();
     let syntax_tree = syn::parse_file(&code).unwrap();
     let formatted = prettyplease::unparse(&syntax_tree);
-    print!("{}", formatted);
+    std::fs::write(&args.output_file, formatted).expect("Fehler beim Schreiben der Datei");
 }
 
 fn print_metadata(model_proto: ModelProto) {

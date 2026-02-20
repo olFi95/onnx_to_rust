@@ -44,7 +44,6 @@ impl<'a> OnnxCodeGenerator<'a> {
         let mut output = quote! {};
         for tensor in self.model_proto.graph.as_ref().unwrap().initializer.clone(){
             let tensor_name = format_ident!("{}", tensor.name.expect("Tensor name missing"));
-            println!("{tensor_name}");
             let tensor_datatype_id = tensor.data_type.expect("Tensor data-type missing");
             let tensor_datatype_onnx = Self::from_i32(tensor_datatype_id).expect("no onnx type found for id");
             let tensor_datatype_rust = format_ident!("{}", rust_type(&tensor_datatype_onnx));
