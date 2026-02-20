@@ -35,7 +35,7 @@ fn main() {
     let args = Args::parse();
 
     let model_proto = deserialize_protobuf_file(args.input_file.as_str()).expect("cannot deserialize .onnx file");
-    let code_generator = nodes::OnnxCodeGenerator::new(&model_proto, args.output_file.parse().unwrap());
+    let code_generator = nodes::OnnxCodeGenerator::new(&model_proto);
     let tensor_data = code_generator.generate_tensor_data();
     let code = tensor_data.to_string();
     let syntax_tree = syn::parse_file(&code).unwrap();

@@ -25,20 +25,13 @@ impl TensorProtoDataType {
 
 pub struct OnnxCodeGenerator<'a> {
     model_proto: &'a ModelProto,
-    output_file: PathBuf
 }
 
 
 impl<'a> OnnxCodeGenerator<'a> {
-    pub(crate) fn new(model_proto: &'a ModelProto, output_file: PathBuf) -> Self {
-        OnnxCodeGenerator{model_proto, output_file}
+    pub(crate) fn new(model_proto: &'a ModelProto) -> Self {
+        OnnxCodeGenerator{model_proto}
     }
-    fn set_output_file(&mut self, output_file: PathBuf) {
-        self.output_file = output_file;
-    }
-    // pub fn find_variable_definition<'a>(&self, var_name: &str) -> &'a Option<TensorProto> {
-    //     self.graph_proto.initializer.iter().as_ref().find(|i| { i.name.unwrap() == var_name })
-    // }
 
     pub fn generate_tensor_data(&self) -> TokenStream {
         let mut output = quote! {};
