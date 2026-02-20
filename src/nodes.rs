@@ -1,15 +1,16 @@
+// Code generator for ONNX models
 use crate::ModelProto;
 use num::Num;
 use quote::__private::TokenStream;
-use quote::{format_ident, quote, ToTokens, TokenStreamExt};
+use quote::{format_ident, quote, TokenStreamExt};
 use std::fmt::Display;
-use std::path::PathBuf;
 
-/// I use only the basic types from https://github.com/onnx/onnx/blob/main/onnx/onnx.proto#L504
+/// Basic ONNX tensor data types
+/// Reference: https://github.com/onnx/onnx/blob/main/onnx/onnx.proto#L504
 pub enum TensorProtoDataType {
     UNDEFINED = 0,
-    // Basic types.
-    FLOAT = 1,  // float
+    // Basic types
+    FLOAT = 1,   // float
     UINT8 = 2,   // uint8_t
     INT8 = 3,    // int8_t
     UINT16 = 4,  // uint16_t
@@ -31,6 +32,95 @@ pub struct OnnxCodeGenerator<'a> {
 impl<'a> OnnxCodeGenerator<'a> {
     pub(crate) fn new(model_proto: &'a ModelProto) -> Self {
         OnnxCodeGenerator{model_proto}
+    }
+
+    /// Generates all inference methods for the layers/nodes of the ONNX model
+    pub fn generate_inference_methods(&self) -> TokenStream {
+        let mut output = quote! {};
+
+        let graph = self.model_proto.graph.as_ref().expect("Model has no graph");
+
+        for node in &graph.node {
+            let node_name = node.name.as_ref().expect("Node has no name");
+            let op_type = node.op_type.as_ref().expect("Node has no op_type");
+
+            // Generate method name from node name (sanitize for valid Rust identifiers)
+            let method_name = format_ident!("layer_{}", sanitize_identifier(node_name));
+
+            // Collect input parameters
+            let input_params = self.generate_input_parameters(&node.input);
+
+            // Determine output types
+            let output_type = self.generate_output_type(&node.output);
+
+            // Generate operation stub using operations modules
+            let implementation = self.generate_operation_stub(op_type, &node.input, &node.output);
+
+            // Doc comments with actual values
+            let doc_comment = format!("Inference method for node: {}\nOperation: {}", node_name, op_type);
+
+            output.append_all(quote! {
+                #[doc = #doc_comment]
+                pub fn #method_name(#input_params) -> #output_type {
+                    #implementation
+                }
+            });
+        }
+
+        output
+    }
+
+    /// Generiert die Input-Parameter für eine Methode
+    fn generate_input_parameters(&self, inputs: &[String]) -> TokenStream {
+        let mut params = quote! {};
+
+        for (idx, _input_name) in inputs.iter().enumerate() {
+            let param_name = format_ident!("input_{}", idx);
+            // Dummy-Typ - später können wir die echten Typen aus dem Graph ermitteln
+            params.append_all(quote! {
+                #param_name: &[f32],
+            });
+        }
+
+        params
+    }
+
+    /// Generates the output type for a method
+    fn generate_output_type(&self, outputs: &[String]) -> TokenStream {
+        if outputs.len() == 1 {
+            quote! { Vec<f32> }
+        } else {
+            // Multiple outputs as tuple
+            let output_types = (0..outputs.len()).map(|_| quote! { Vec<f32> });
+            quote! { (#(#output_types),*) }
+        }
+    }
+
+    /// Generates a stub for the operation using match statement
+    /// Delegates to operation-specific modules for code generation
+    fn generate_operation_stub(&self, op_type: &str, inputs: &[String], outputs: &[String]) -> TokenStream {
+        use crate::operations::OperationCodeGenerator;
+
+        match op_type {
+            "Gemm" => crate::operations::gemm::GemmOperation.generate_implementation(inputs, outputs),
+            "Relu" => crate::operations::relu::ReluOperation.generate_implementation(inputs, outputs),
+            "Softmax" => crate::operations::softmax::SoftmaxOperation.generate_implementation(inputs, outputs),
+            "Conv" => crate::operations::conv::ConvOperation.generate_implementation(inputs, outputs),
+            "MaxPool" => crate::operations::maxpool::MaxPoolOperation.generate_implementation(inputs, outputs),
+            "Add" => crate::operations::add::AddOperation.generate_implementation(inputs, outputs),
+            "Mul" => crate::operations::mul::MulOperation.generate_implementation(inputs, outputs),
+            "MatMul" => crate::operations::matmul::MatMulOperation.generate_implementation(inputs, outputs),
+            "Reshape" => crate::operations::reshape::ReshapeOperation.generate_implementation(inputs, outputs),
+            "Flatten" => crate::operations::flatten::FlattenOperation.generate_implementation(inputs, outputs),
+            "BatchNormalization" => crate::operations::batch_normalization::BatchNormalizationOperation.generate_implementation(inputs, outputs),
+            "Dropout" => crate::operations::dropout::DropoutOperation.generate_implementation(inputs, outputs),
+            _ => {
+                // Fallback for unsupported operations
+                quote! {
+                    unimplemented!(concat!("Operation ", #op_type, " not yet implemented"))
+                }
+            }
+        }
     }
 
     pub fn generate_tensor_data(&self) -> TokenStream {
@@ -91,17 +181,15 @@ pub fn rust_type(onnx_type: &TensorProtoDataType) -> String {
 fn generate_array_declaration_string(dimensions: &Vec<i64>, datatype: &str) -> String {
     fn generate_recursive(dimensions: &Vec<i64>, depth: usize, datatype: &str) -> String {
         let mut result = String::new();
-        result.push('['); // Start of the current array level
+        result.push('[');
         if depth == 0 {
-            result.push_str(datatype); // The innermost dimension is always i32
+            result.push_str(datatype);
         } else {
             result.push_str(&generate_recursive(dimensions, depth-1, datatype));
         }
         result.push_str("; ");
         result.push_str(dimensions[depth].to_string().as_str());
-
-        result.push(']'); // End of the current array level
-
+        result.push(']');
         result
     }
 
@@ -136,13 +224,23 @@ fn generate_array_data_string<T: Num + Copy + std::fmt::Display>(dimensions: &Ve
     return recurse(&dimensions, &x)
 }
 
+/// Sanitizes a string to make it a valid Rust identifier
+fn sanitize_identifier(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c.to_lowercase().next().unwrap_or(c)
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 
 #[cfg(test)]
 mod tests {
-    // Bring the outer scope into the test module
     use super::*;
-
-    // Unit test for the `add` function
     #[test]
     fn test_generate_array_data_string() {
         let dimensions = vec![2, 4];

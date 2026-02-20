@@ -1,4 +1,5 @@
 mod nodes;
+mod operations;
 use clap::Parser;
 use prost::Message;
 use std::fmt::Display;
@@ -36,11 +37,21 @@ fn main() {
 
     let model_proto = deserialize_protobuf_file(args.input_file.as_str()).expect("cannot deserialize .onnx file");
     let code_generator = nodes::OnnxCodeGenerator::new(&model_proto);
+
     let tensor_data = code_generator.generate_tensor_data();
-    let code = tensor_data.to_string();
+
+    let inference_methods = code_generator.generate_inference_methods();
+
+    let combined = quote::quote! {
+        #tensor_data
+
+        #inference_methods
+    };
+
+    let code = combined.to_string();
     let syntax_tree = syn::parse_file(&code).unwrap();
     let formatted = prettyplease::unparse(&syntax_tree);
-    std::fs::write(&args.output_file, formatted).expect("Fehler beim Schreiben der Datei");
+    std::fs::write(&args.output_file, formatted).expect("Error writing to file");
 }
 
 fn print_metadata(model_proto: ModelProto) {
